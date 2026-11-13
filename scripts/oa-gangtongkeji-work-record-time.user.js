@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         港通科技 OA - 工作记录时间快捷填充
 // @namespace    https://oa.gangtongkeji.com/gm/work-record-time
-// @version      0.4.0
-// @description  在「添加工作记录」弹层标题栏添加「上午」「下午」按钮，一键填入可自定义的预设时间（默认 08:00-12:00 / 13:00-17:00）；扩展页「高级功能」开关可放开日期选择限制
+// @version      0.5.0
+// @description  在「添加工作记录」弹层标题栏添加「上午」「下午」「餐补」「车补」按钮，一键填入可自定义的预设时间，打开弹层默认填「上午」预设；扩展页「高级功能」开关可放开日期选择限制
 // @match        https://oa.gangtongkeji.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -27,19 +27,23 @@ advanced:
   // 目标弹层标题文字（layui-layer-title 的纯文本）
   const TITLE_TEXT = '添加工作记录';
 
-  // 两个预设按钮：key 对应存储里的字段，label 是按钮文字
+  // 预设按钮：key 对应存储里的字段，label 既是按钮文字，也是设置面板里的行名
   const PRESET_BUTTONS = [
     { key: 'morning', label: '上午' },
     { key: 'afternoon', label: '下午' },
+    { key: 'meal', label: '餐补' },
+    { key: 'car', label: '车补' },
   ];
 
-  // 预设时间的默认值（用户在「设置」面板里改过的值会覆盖它）
+  // 预设时间的默认值（用户在「时间预设」面板里改过的值会覆盖它）
   const DEFAULT_PRESET_TIMES = {
     morning: { start: '08:00', end: '12:00' },
     afternoon: { start: '13:00', end: '17:00' },
+    meal: { start: '18:00', end: '20:00' },
+    car: { start: '18:00', end: '21:30' },
   };
 
-  // GM 存储键：保存两组预设时间，形如 { morning: {start,end}, afternoon: {start,end} }
+  // GM 存储键：保存全部预设时间，形如 { morning: {start,end}, afternoon: {...}, meal: {...}, car: {...} }
   const STORAGE_KEY = 'sc_work_time_presets';
 
   // 高级功能开关的存储键：由扩展页「脚本配置」里的 UserConfig 开关写入，未设置时视为 false
@@ -110,6 +114,31 @@ advanced:
   function applyPreset(layer, start, end) {
     setTime(findWrapper(layer, 'start_time_b', FALLBACK_XPATH.start), start);
     setTime(findWrapper(layer, 'end_time_b', FALLBACK_XPATH.end), end);
+  }
+
+  /**
+   * 弹层打开时把时间范围预填成「上午」预设
+   * 页面原生默认是 09:00 / 09:30，要等 layui 把下拉项 dd 渲染出来再点，否则点不到
+   * @param {HTMLElement} layer 弹层根节点
+   * @param {number} [retry] 已重试次数
+   */
+  function applyMorningPreset(layer, retry) {
+    const startWrapper = findWrapper(layer, 'start_time_b', FALLBACK_XPATH.start);
+    const endWrapper = findWrapper(layer, 'end_time_b', FALLBACK_XPATH.end);
+    const ready =
+      startWrapper && endWrapper && startWrapper.querySelector('dd') && endWrapper.querySelector('dd');
+
+    // 下拉项还没渲染出来时短暂重试，和默认工作类别同样的时序处理
+    if (!ready) {
+      if (!retry || retry < 10) {
+        setTimeout(function () {
+          applyMorningPreset(layer, (retry || 0) + 1);
+        }, 100);
+      }
+      return;
+    }
+
+    applyPreset(layer, presetTimes.morning.start, presetTimes.morning.end);
   }
 
   // #endregion
@@ -243,7 +272,7 @@ advanced:
   // 当前生效的预设时间：启动时从 GM 存储读取，点「上午」「下午」时使用
   let presetTimes = loadPresetTimes();
 
-  // 设置按钮的引用，用来判断点击是否在面板外部
+  // 「时间预设」按钮的引用，用来判断点击是否在面板外部
   let settingsAnchor = null;
 
   /**
@@ -275,27 +304,25 @@ advanced:
   /**
    * 从 GM 存储读取预设时间
    * 某一组不存在或不合法（例如被手动改坏）就回落到默认值，绝不把坏值带进表单
-   * @returns {{morning: {start: string, end: string}, afternoon: {start: string, end: string}}}
+   * 旧版本只存了上午/下午，新增的餐补/车补会自动用默认值补齐
+   * @returns {Object} 形如 { morning: {start, end}, afternoon: {...}, meal: {...}, car: {...} }
    */
   function loadPresetTimes() {
-    const result = {
-      morning: {
-        start: DEFAULT_PRESET_TIMES.morning.start,
-        end: DEFAULT_PRESET_TIMES.morning.end,
-      },
-      afternoon: {
-        start: DEFAULT_PRESET_TIMES.afternoon.start,
-        end: DEFAULT_PRESET_TIMES.afternoon.end,
-      },
-    };
+    // 先用默认值铺底，保证每个预设都有可用值
+    const result = {};
+    PRESET_BUTTONS.forEach(function (preset) {
+      const def = DEFAULT_PRESET_TIMES[preset.key];
+      result[preset.key] = { start: def.start, end: def.end };
+    });
 
     const saved = GM_getValue(STORAGE_KEY, null);
     if (!saved || typeof saved !== 'object') return result;
 
-    ['morning', 'afternoon'].forEach(function (key) {
-      const item = saved[key];
+    // 存储里通过校验的值覆盖默认值
+    PRESET_BUTTONS.forEach(function (preset) {
+      const item = saved[preset.key];
       if (item && checkPair('', item.start, item.end) === '') {
-        result[key] = { start: item.start, end: item.end };
+        result[preset.key] = { start: item.start, end: item.end };
       }
     });
     return result;
@@ -336,13 +363,13 @@ advanced:
   }
 
   /**
-   * 点击面板与「设置」按钮之外的地方就关闭面板
+   * 点击面板与「时间预设」按钮之外的地方就关闭面板
    * 用捕获阶段，避免被内部元素 stopPropagation 拦住
    */
   function onOutsideMouseDown(e) {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // 弹层被关掉（设置按钮已不在文档里）时也一并关闭面板
+    // 弹层被关掉（「时间预设」按钮已不在文档里）时也一并关闭面板
     if (!settingsAnchor || !document.body.contains(settingsAnchor)) {
       closeSettingsPanel();
       return;
@@ -352,9 +379,9 @@ advanced:
   }
 
   /**
-   * 打开预设时间设置面板
+   * 打开预设时间编辑面板
    * 面板挂到 body 上并 position:fixed，不放进标题栏，所以不影响标题拖动和关闭按钮
-   * @param {HTMLElement} anchor 「设置」按钮，用来定位面板
+   * @param {HTMLElement} anchor 「时间预设」按钮，用来定位面板
    */
   function openSettingsPanel(anchor) {
     if (document.getElementById(PANEL_ID)) return;
@@ -366,9 +393,11 @@ advanced:
       'background:#fff;border:1px solid #d2d2d2;border-radius:4px;' +
       'box-shadow:0 2px 12px rgba(0,0,0,.18);font-size:13px;color:#333;';
     panel.innerHTML =
-      '<div style="margin-bottom:10px;font-size:14px;color:#333;">预设时间设置</div>' +
+      '<div style="margin-bottom:10px;font-size:14px;color:#333;">时间预设</div>' +
       buildRow('上午', 'morning', presetTimes.morning) +
       buildRow('下午', 'afternoon', presetTimes.afternoon) +
+      buildRow('餐补', 'meal', presetTimes.meal) +
+      buildRow('车补', 'car', presetTimes.car) +
       '<div data-role="error" style="min-height:18px;line-height:18px;font-size:12px;color:#ff5722;"></div>' +
       '<div style="display:flex;justify-content:flex-end;gap:6px;">' +
       '<button type="button" data-role="reset" style="' + PANEL_BUTTON_STYLE + '">恢复默认</button>' +
@@ -386,22 +415,21 @@ advanced:
 
     const errorEl = panel.querySelector('[data-role="error"]');
 
-    // 保存：先校验，不合法只在面板里提示，不写存储、不影响当前生效值
+    // 保存：先校验全部预设，任意一组不合法就只在面板里提示，不写存储、不影响当前生效值
     panel.querySelector('[data-role="save"]').addEventListener('click', function () {
-      const values = {
-        morning: {
-          start: readPanelTime(panel, 'morning', 'start'),
-          end: readPanelTime(panel, 'morning', 'end'),
-        },
-        afternoon: {
-          start: readPanelTime(panel, 'afternoon', 'start'),
-          end: readPanelTime(panel, 'afternoon', 'end'),
-        },
-      };
+      const values = {};
+      let error = '';
 
-      const error =
-        checkPair('上午', values.morning.start, values.morning.end) ||
-        checkPair('下午', values.afternoon.start, values.afternoon.end);
+      PRESET_BUTTONS.forEach(function (preset) {
+        const item = {
+          start: readPanelTime(panel, preset.key, 'start'),
+          end: readPanelTime(panel, preset.key, 'end'),
+        };
+        values[preset.key] = item;
+        // 累积第一条错误提示
+        error = error || checkPair(preset.label, item.start, item.end);
+      });
+
       if (error) {
         errorEl.textContent = error;
         return;
@@ -458,7 +486,7 @@ advanced:
       });
       btn.addEventListener('click', function (e) {
         e.stopPropagation();
-        // 每次点击时取当前生效值，用户在「设置」里改过的时间立刻生效
+        // 每次点击时取当前生效值，用户在「时间预设」里改过的时间立刻生效
         const times = presetTimes[preset.key];
         applyPreset(layer, times.start, times.end);
         // 闪烁提示：先快速闪成主题绿（0.1s 闪入），再慢速淡回白色（0.45s 淡出）
@@ -474,11 +502,11 @@ advanced:
       bar.appendChild(btn);
     });
 
-    // 「设置」按钮：打开预设时间编辑面板，尺寸比预设按钮略小
+    // 「时间预设」按钮：打开预设时间编辑面板，尺寸比预设按钮略小
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
-    settingsBtn.textContent = '设置';
-    settingsBtn.title = '修改上午 / 下午的预设时间';
+    settingsBtn.textContent = '时间预设';
+    settingsBtn.title = '修改上午 / 下午 / 餐补 / 车补的预设时间';
     settingsBtn.style.cssText =
       'height:24px;line-height:22px;padding:0 12px;font-size:12px;cursor:pointer;' +
       'color:#16baaa;background:#fff;border:1px solid #16baaa;border-radius:3px;';
@@ -493,9 +521,10 @@ advanced:
 
     title.appendChild(bar);
 
-    // 弹层刚打开时设置一次工作类别与工作类型的默认值
+    // 弹层刚打开时设置一次工作类别与工作类型的默认值，并把时间范围预填为「上午」预设
     applyDefaultCategory(layer);
     applyDefaultLaborType(layer);
+    applyMorningPreset(layer);
     // 只有扩展页「高级功能」开关打开时才放开日期限制；每次弹层注入读一次，切换开关后重开弹层即生效
     if (GM_getValue(ADVANCED_DATE_KEY, false)) removeMinDateLimit(layer);
   }
